@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PTC 批处理优化实战：总 token 下降 67%，模型调用减半</title>
+<meta name="description" content="一次零代码改动的 PTC 程序化工具调用优化：通过全局 AGENTS.md 的 7 条默认规则，把无依赖工具调用合并进单个程序，总 token 下降 67%、模型调用减半、耗时下降 24%-47%。含完整基线审计、同题配对验证与反事实估算。">
+<meta name="author" content="greatyingzi">
+<link rel="canonical" href="https://greatyingzi.github.io/ai-tech-trends/ptc-batching-optimization.html">
+<style>
+:root{--bg:#0d1117;--card:#161b22;--line:#30363d;--text:#e6edf3;--muted:#8b949e;--green:#3fb950;--blue:#58a6ff;--orange:#d29922;--purple:#bc8cff}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;line-height:1.8;padding:0 16px}
+.wrap{max-width:920px;margin:0 auto}
+header{padding:64px 0 40px;border-bottom:1px solid var(--line)}
+.tag{display:inline-block;font-size:12px;letter-spacing:.12em;color:var(--blue);border:1px solid var(--blue);border-radius:20px;padding:3px 12px;margin-bottom:18px}
+h1{font-size:clamp(28px,5vw,44px);line-height:1.25;letter-spacing:-.02em;margin-bottom:16px}
+.sub{color:var(--muted);font-size:16px;max-width:720px}
+.meta{color:var(--muted);font-size:13px;margin-top:20px}
+section{padding:40px 0;border-bottom:1px solid var(--line)}
+h2{font-size:26px;margin-bottom:18px;display:flex;align-items:center;gap:10px}
+h2::before{content:"";width:4px;height:24px;background:var(--green);border-radius:2px}
+h3{font-size:18px;margin:26px 0 12px;color:var(--blue)}
+p{margin:12px 0;color:#c9d1d9}
+ul,ol{margin:12px 0 12px 22px;color:#c9d1d9}
+li{margin:7px 0}
+code{background:#21262d;border:1px solid var(--line);border-radius:5px;padding:1px 6px;font-size:.9em;color:var(--purple)}
+pre{background:#010409;border:1px solid var(--line);border-radius:10px;padding:16px;overflow-x:auto;margin:16px 0;font-size:13px;color:#c9d1d9}
+table{width:100%;border-collapse:collapse;margin:18px 0;font-size:14px}
+th,td{border:1px solid var(--line);padding:10px 12px;text-align:left}
+th{background:#161b22;color:var(--blue);font-weight:600}
+td b{color:var(--green)}
+.goals{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;margin:24px 0}
+.goal{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px}
+.goal .k{font-size:12px;color:var(--muted);letter-spacing:.1em}
+.goal .v{font-size:30px;color:var(--green);font-weight:700;margin:8px 0}
+.goal .d{font-size:13px;color:var(--muted)}
+.note{background:rgba(210,153,34,.08);border-left:3px solid var(--orange);padding:12px 16px;margin:18px 0;border-radius:0 8px 8px 0;font-size:14px;color:#d6b656}
+.ok{background:rgba(63,185,80,.08);border-left:3px solid var(--green);padding:12px 16px;margin:18px 0;border-radius:0 8px 8px 0;color:#8ddb9c}
+footer{padding:32px 0 60px;color:var(--muted);font-size:13px}
+a{color:var(--blue)}
+@media(max-width:600px){table{font-size:12px}th,td{padding:7px}h1{font-size:26px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+<span class="tag">ENGINEERING / PTC</span>
+<h1>PTC 批处理优化实战：<br>总 token 下降 67%，模型调用减半</h1>
+<p class="sub">一次只改了一行配置文本的 PTC（程序化工具调用）优化。围绕两个终极目标——省钱（总 token 含缓存命中下降）与省时（并行减少对模型的串行调用）——给出完整的基线审计、方案选择、同题配对验证和真实使用数据。</p>
+<p class="meta">2026-11-20 · 阅读约 10 分钟 · 数据来自 224 个历史会话 + 9 组干净房间对照实验</p>
+</header>
+
+<section>
+<h2>两个终极目标（先看这里）</h2>
+<div class="goals">
+<div class="goal"><div class="k">目标 1 · 省钱</div><div class="v">−67%</div><div class="d">单任务总 token（含缓存重读）143,849 → 46,964。缓存重读占 token 总量 85%，是收费大头。</div></div>
+<div class="goal"><div class="k">目标 2 · 省时</div><div class="v">6 → 2</div><div class="d">同一任务的模型调用次数；耗时 37s → 28s（−24%）。另一组 10 → 4 次，57s → 30s（−47%）。</div></div>
+</div>
+<div class="ok"><b>核心结论：</b>零代码改动、零配置改动、无需重启，只在每会话首请求必注入的 <code>~/.agents/AGENTS.md</code> 追加 7 条默认规则。省钱与省时同源：少一次模型调用，就少重送一次完整上下文，也少一轮串行等待。</div>
+<p>真实使用一天后的结构效率：批处理调用占比 <b>4.92% → 58.86%（约 12 倍）</b>，出现真实并发重叠的程序 <b>1.28% → 24.54%（约 19 倍）</b>，每 turn 程序数与步骤数均约减半。干净房间 9 个任务 <b>9/9 全部答对</b>。</p>
+</section>
+
+<section>
+<h2>什么是 PTC</h2>
+<p>PTC（Programmatic Tool Calling，程序化工具调用）是 DSH 的一种工具执行模式：模型不再逐个点名调用工具，而是提交一段程序（<code>run_code</code>），由程序在运行时通过生成的 SDK 调用其他工具。</p>
+<p>实现由 <code>@deepseek-ai/dsh-tool-executor-ptc</code> 提供，向系统提示注入三部分：</p>
+<ol>
+<li><b>tools:ptc-only 规则</b>：唯一可直接调用的工具是 <code>run_code</code>，其他工具必须从程序内部调用；直接点名调用会被判 <code>UNKNOWN_TOOL</code>。</li>
+<li><b>tools:sdk 段</b>：自动生成的 TypeScript 声明——可见工具按字典序排列，description 变成 JSDoc，JSON Schema 转成 TS 类型。原生工具 schema 被省略，这段 SDK 是模型获知工具参数与用途的唯一来源。</li>
+<li><b>run_code schema</b>：<code>code</code>（async 函数体）与 <code>description</code> 必填；可选 <code>timeoutMs</code>（默认 120s、上限 600s）、<code>sandbox_permissions</code> + <code>justification</code>。</li>
+</ol>
+<h3>关键特点</h3>
+<ul>
+<li><code>code</code> 是 async 函数体而非完整文件；顶层 <code>await</code>/<code>return</code> 可用；只接受可擦除 TypeScript（禁 <code>enum</code>/<code>namespace</code>）。</li>
+<li>工具经 <code>await tools.name(args)</code> 调用；失败抛 <code>ToolCallError</code>；只有 <code>console.log</code> 和 <code>return</code> 的值成为输出。</li>
+<li>执行管线按 <code>isConcurrencySafe(args)</code> 把工具分为并发安全与 exclusive barrier 两类。当前 safe 工具仅 9 个：<code>read</code>、<code>read_image</code>、<code>web_fetch</code>、<code>web_search</code>、三个 session 查询工具、<code>subagent</code>、<code>list_agents</code>；<code>bash</code>/<code>grep</code>/<code>glob</code>/<code>edit</code>/<code>write</code> 均为 exclusive。</li>
+<li>本环境为 per-call 模式：每次 <code>run_code</code> 都是全新 Node 进程，不保留跨调用状态（已实测）。</li>
+</ul>
+</section>
+
+<section>
+<h2>优化前的状态：利用率很低</h2>
+<p>对 <code>~/.dsh/sessions/</code> 下 224 个会话、32,735 个 <code>run_code</code> 程序、45,523 次嵌套工具调用做全量审计：</p>
+<table>
+<tr><th>指标</th><th>基线值</th></tr>
+<tr><td>批处理程序占比</td><td>2.40%</td></tr>
+<tr><td>批处理调用占比（按调用数）</td><td>5.40%</td></tr>
+<tr><td>每程序平均嵌套调用数</td><td>1.39</td></tr>
+<tr><td>只含 1 个调用的程序</td><td>67.0%（21,932 个）</td></tr>
+<tr><td>出现真实并发重叠的程序</td><td>1.28%</td></tr>
+<tr><td><code>for (...) await tools.*</code> 串行循环</td><td>887 个程序、2,593 次调用</td></tr>
+<tr><td>同一 step 拆成多个 run_code</td><td>288 个 step / 601 个程序</td></tr>
+<tr><td>direct-fs 逃逸</td><td>2,416 个程序 = 7.38%</td></tr>
+<tr><td>bash 占嵌套调用</td><td>62%，且是 exclusive</td></tr>
+</table>
+<h3>典型漏并行</h3>
+<pre>// 5 张独立图片逐个等待（此类程序 887 个）
+for (const s of ["qa_dense_01", "qa_dense_02", "qa_dense_03"]) {
+  await tools.read_image({ file_path: \`.../\${s}.png\` });
+}</pre>
+<h3>根因</h3>
+<ol>
+<li>SDK 指令只说 "Independent read-only calls <b>MAY</b> overlap under Promise.all"——许可，不是要求。</li>
+<li>任务措辞能压倒能力：改成"按清单顺序逐项核对"，批处理率从 54.5% 掉到 0%，还多读一遍。</li>
+<li>生成的 SDK 没有并发安全标注，模型不知道该批谁。</li>
+<li>exclusive 工具一出现，扇出就消失；模型转而发现 direct-fs 逃逸。</li>
+</ol>
+</section>
+
+<section>
+<h2>优化方案：怎么做的</h2>
+<table>
+<tr><th>候选</th><th>判定</th></tr>
+<tr><td>写 skill</td><td>否决：不自动注入、命中靠运气、读 skill 本身费 token</td></tr>
+<tr><td>改全局 systemPrompt.personaPrefix</td><td>否决：无通用自由文本字段，且被 ptc preset 的 persona 在 agent scope 覆盖</td></tr>
+<tr><td>改 PTC_ONLY_INSTRUCTION 源码</td><td>效果精准但需改插件并重载，成本高；暂不上</td></tr>
+<tr><td><b>写进 ~/.agents/AGENTS.md</b></td><td><b>采用</b>：dsh-agent-instructions 在会话首请求必加载用户全局指令链；文件已注入，边际成本近零</td></tr>
+</table>
+<h3>落地的 7 条规则</h3>
+<ol>
+<li>一个任务尽量一个 <code>run_code</code>；相位间用 <code>await</code> 在同一程序内衔接。</li>
+<li>写程序前先列依赖图：无数据依赖的调用全部放进同一个 <code>Promise.allSettled([...])</code>。</li>
+<li>禁止 <code>for (...) await tools.x(...)</code>，改成 <code>items.map(...)</code> 放进 allSettled。</li>
+<li>任务措辞即使写着"按顺序/逐项"，只要无数据依赖仍批量执行。</li>
+<li>标明可并发的 safe 工具；exclusive 工具仍应放进同一程序省往返。</li>
+<li><code>return</code> 只给摘要，中间结果留在程序局部。</li>
+<li>bash 里 <code>node</code> 不在 PATH，用 <code>/opt/homebrew/bin/node</code> 或 <code>await import("node:...")</code>。</li>
+</ol>
+<p class="note"><b>影响面与回滚：</b>所有会话（含子 agent）每次首请求多约 500 字节指令；不改插件、不改配置、不需重启。删除该 section 即可回滚。</p>
+</section>
+
+<section>
+<h2>验证：总 token（含缓存）下降多少</h2>
+<p>口径：<code>totalTokens = inputTokens + outputTokens + cacheReadTokens</code>，缓存重读是 token 大头，必须计入。数据来自会话日志 <code>assistant/message.usage</code> 实测值。</p>
+<h3>同题配对（同一任务、同一模型、改规则前后）</h3>
+<table>
+<tr><th>配对</th><th>模型调用</th><th>总 token</th><th>绝对节省</th><th>程序数</th><th>耗时</th></tr>
+<tr><td>V1 → V5（串行措辞题）</td><td>6 → 2</td><td>143,849 → 46,964</td><td><b>−96,885（−67%）</b></td><td>5 → 1</td><td>37s → 28s（−24%）</td></tr>
+<tr><td>V2 → V6（混合工具题）</td><td>10 → 4</td><td>278,086 → 99,941</td><td><b>−178,145（−64%）</b></td><td>9 → 3</td><td>57s → 30s（−47%）</td></tr>
+<tr><td>V0 → V5（同目标）</td><td>6 → 2</td><td>201,965 → 46,964</td><td><b>−155,001（−77%）</b></td><td>5 → 1</td><td>37s → 28s</td></tr>
+</table>
+<p>V0 的 cacheRead 为 160,256 token，V5 只有 21,504——这就是减少调用次数带来的直接效果。</p>
+<h3>真实会话的反事实总账</h3>
+<p>改规则后真实会话里有 97 个批处理程序、372 次嵌套调用，等价省下 <b>275 次模型调用</b>。这批程序实际消耗 <b>8,269,196 token</b>；若不批量、改成 275 个独立模型步，按每步重送实测上下文计算，需额外 <b>21,533,385 – 21,928,137 token</b>（缓存重读占 85%），总账约 2.6 倍。</p>
+<p>拆开 21.5M：新输入 2,853,792、缓存重读 18,374,656、输出 304,937。按 token 总量口径就是省约 2,150 万；若按 cache=0.1× 输入价折算账单等价约 500 万。</p>
+<h3>统计辅证：同一会话内配对</h3>
+<table>
+<tr><th>队列</th><th>每次调用 token（批量/单调用，中位数）</th><th>配对比值</th><th>Wilcoxon</th></tr>
+<tr><td>改前（125 个会话）</td><td>114,823 / 296,264</td><td>0.358</td><td>z=−9.70，p&lt;0.001</td></tr>
+<tr><td>改后（8 个会话）</td><td>175,306 / 456,100</td><td>0.332</td><td>z=−2.52，p=0.012</td></tr>
+</table>
+<p class="note">跨队列（OLD vs NEW）直接比"每次调用 token"并不显著——任务类型、会话长度与样本量把效应淹没了，那是统计设计无功效，不是没省 token。会话内配对与反事实总账方向一致。</p>
+</section>
+
+<section>
+<h2>质量、边界与后续</h2>
+<p><b>质量未退化：</b>干净房间 9/9 正确；重复调用占比 6.18% → 4.64%；result 错误/dispatch 3.76% → 2.02%；turn 失败率 10.95% → 8.57%。dispatch 错误率 1.64% → 6.05% 上升，抽查后主要是可恢复的过程性失败（文件不存在、edit 锚点不匹配、编译被 abort）。</p>
+<p><b>三个残留问题：</b></p>
+<ul>
+<li>混合任务仍会逃逸 direct-fs（7.38% → 9.66%），工具日志看不到 I/O——属于插件层治理。</li>
+<li>长序列代码编辑任务有时忽略批处理规则（复盘会话中一个 0 处漏批、一个 12 处漏批）。</li>
+<li>单程序塞更多逻辑，语法错误会让整批调用一起失败——目前仅单会话样本，需继续观察。</li>
+</ul>
+<p>后续可做的插件层优化：给 <code>grep</code>/<code>glob</code> 标 <code>isConcurrencySafe</code>、在生成的 SDK 里标注并发安全、排查 885 个"源码有工具调用但无 dispatch 事件"的日志缺口、决定是否允许 direct-fs。</p>
+</section>
+
+<section>
+<h2>结论</h2>
+<p class="ok">只改了一份每会话必注入的文本文件，就同时达成两个终极目标：<b>总 token 下降（省钱）</b>与<b>并行减少调用（省时）</b>。关键不是让模型"更努力地并发"，而是把批处理写成默认行为——提示词里一句 "MAY overlap" 不够，必须写成硬规则。</p>
+</section>
+
+<footer>数据与脚本：会话日志 session.v4.jsonl.zstd（zstd 解压）+ 自建审计脚本。所有数字均来自实测或明确标注的反事实模型。</footer>
+</div>
+</body>
+</html>
